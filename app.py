@@ -436,7 +436,7 @@ def admin_reset_usage():
 
 PAYFAST_MERCHANT_ID = os.environ.get("PAYFAST_MERCHANT_ID", "10000100")  # sandbox default
 PAYFAST_MERCHANT_KEY = os.environ.get("PAYFAST_MERCHANT_KEY", "46f0cd694581a")  # sandbox default
-PAYFAST_PASSPHRASE = os.environ.get("PAYFAST_PASSPHRASE", "")  # optional
+PAYFAST_PASSPHRASE = os.environ.get("PAYFAST_PASSPHRASE", "jt7NOE43FZPn")  # sandbox default
 PAYFAST_SANDBOX = os.environ.get("PAYFAST_SANDBOX", "true").lower() == "true"
 PAYFAST_URL = "https://sandbox.payfast.co.za/eng/process" if PAYFAST_SANDBOX else "https://www.payfast.co.za/eng/process"
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
@@ -498,7 +498,9 @@ def create_payment():
     pf_data["merchant_key"] = PAYFAST_MERCHANT_KEY
     pf_data["return_url"] = f"{FRONTEND_URL}/success.html?ref={payment['id']}"
     pf_data["cancel_url"] = f"{FRONTEND_URL}/#pricing"
-    pf_data["notify_url"] = f"{request.url_root.rstrip('/')}/webhook/payfast"
+    # Force HTTPS for notify_url (Railway proxy reports HTTP)
+    base_url = request.url_root.rstrip('/').replace('http://', 'https://')
+    pf_data["notify_url"] = f"{base_url}/webhook/payfast"
     if name_first:
         pf_data["name_first"] = name_first
     if name_last:
