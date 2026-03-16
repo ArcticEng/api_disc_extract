@@ -444,11 +444,16 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 def _payfast_signature(data: dict) -> str:
     """Generate PayFast MD5 signature."""
-    # Build query string in the order PayFast expects
-    params = urllib.parse.urlencode(data)
+    # PayFast requires: fields in submission order, empty values excluded,
+    # values URL-encoded, then MD5 hashed.
+    pf_str = "&".join(
+        f"{k}={urllib.parse.quote_plus(str(v).strip())}"
+        for k, v in data.items()
+        if v is not None and str(v).strip() != ""
+    )
     if PAYFAST_PASSPHRASE:
-        params += f"&passphrase={urllib.parse.quote_plus(PAYFAST_PASSPHRASE)}"
-    return hashlib.md5(params.encode()).hexdigest()
+        pf_str += f"&passphrase={urllib.parse.quote_plus(PAYFAST_PASSPHRASE.strip())}"
+    return hashlib.md5(pf_str.encode()).hexdigest()
 
 
 @app.route("/api/create-payment", methods=["POST"])
@@ -482,20 +487,26 @@ def create_payment():
     pricing = db.PLAN_PRICING[plan]
 
     # Build PayFast form data
-    pf_data = {
-        "merchant_id": PAYFAST_MERCHANT_ID,
-        "merchant_key": PAYFAST_MERCHANT_KEY,
-        "return_url": f"{FRONTEND_URL}/success.html?ref={payment['id']}",
-        "cancel_url": f"{FRONTEND_URL}/#pricing",
-        "notify_url": f"{request.url_root.rstrip('/')}/webhook/payfast",
-        "name_first": name.split()[0] if name else name,
-        "name_last": " ".join(name.split()[1:]) if len(name.split()) > 1 else "",
-        "email_address": email,
-        "m_payment_id": payment["id"],
-        "amount": pricing["amount"],
-        "item_name": f"DiscDecode {pricing['name']} Plan - {pricing['limit']} lookups/month",
-        "item_description": f"Monthly subscription for {pricing['limit']} licence disc lookups",
-    }
+    # Build PayFast data — order matters for signature!
+    # Empty values must be excluded entirely.
+    name_parts = name.split() if name else [name]
+    name_first = name_parts[0]
+    name_last = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+
+    pf_data = {}
+    pf_data["merchant_id"] = PAYFAST_MERCHANT_ID
+    pf_data["merchant_key"] = PAYFAST_MERCHANT_KEY
+    pf_data["return_url"] = f"{FRONTEND_URL}/success.html?ref={payment['id']}"
+    pf_data["cancel_url"] = f"{FRONTEND_URL}/#pricing"
+    pf_data["notify_url"] = f"{request.url_root.rstrip('/')}/webhook/payfast"
+    if name_first:
+        pf_data["name_first"] = name_first
+    if name_last:
+        pf_data["name_last"] = name_last
+    pf_data["email_address"] = email
+    pf_data["m_payment_id"] = payment["id"]
+    pf_data["amount"] = pricing["amount"]
+    pf_data["item_name"] = f"DiscDecode {pricing['name']} Plan"
 
     pf_data["signature"] = _payfast_signature(pf_data)
 
