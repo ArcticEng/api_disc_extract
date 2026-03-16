@@ -61,35 +61,58 @@ def _prepare_image(image_bytes: bytes, content_type: str) -> tuple[str, str]:
 
 EXTRACTION_PROMPT = """You are an expert OCR system specialised in South African vehicle licence discs (lisensieskyfies).
 
-The image may be rotated, angled, or have glare — handle this gracefully.
+CRITICAL — ROTATION HANDLING:
+The disc image may be rotated 90°, 180°, or 270°, or at any angle. Before reading ANY text:
+1. Look for the words "LISENSIESKYF" (usually curved along the top) and "LICENCE DISC" (usually at the bottom).
+2. Use these anchor words to determine the correct orientation.
+3. Mentally rotate the image so "LISENSIESKYF" is at the top and "LICENCE DISC" is at the bottom.
+4. ONLY THEN read the fields in their correct orientation.
 
-Analyse the image carefully and extract **every** field visible on the disc.
+Known SA licence disc layout (top to bottom after correct rotation):
+- Top curve: LISENSIESKYF
+- RSA + NO. (disc number) + NR.
+- Licence no. / Lisensienr: ........  Veh. register no. / Vrt.registernr: ........
+- VIN: ........ (17 characters, e.g. WUAZZFX2H7904038)
+- Engine no. / Enjinnr: ........
+- Make / Fabrikaat: ........
+- Description / Beskrywing: ........ (e.g. COUPE (open top))
+- [barcode area]
+- Date of test / Datum van toets: YYYY-MM-DD
+- Persons / Persone: NNN   Seated / Sittende: NNN   Standing / Staande: NNN
+- Date of expiry / Vervaldatum: YYYY-MM-DD
+- Bottom: LICENCE DISC
+- Right side labels: Fees/Gelde, GVM/BVM (in kg), Tare/Tarra (in kg), Fabrikaat, Beskrywing
+
+Extract **every** field visible on the disc.
 
 Return ONLY a JSON object (no markdown, no commentary) with exactly these keys.
 If a field is not visible or unreadable, set its value to `null`.
 
 {
-  "disc_number": "The licence disc number (after NO.)",
+  "disc_number": "The disc number after NO. (e.g. 1001056N64N8)",
   "licence_number": "Licence / Lisensie number (e.g. CAA272324 or 1MAGIN8WP)",
   "vehicle_register_number": "Vehicle registration / Vrt.registernr (e.g. WMH861W or HBH682K)",
-  "vin": "Vehicle Identification Number (17-char VIN)",
+  "vin": "Vehicle Identification Number — always exactly 17 characters (e.g. WUAZZFX2H7904038)",
   "engine_number": "Engine number / Enjinnr (e.g. CSP00683)",
   "make": "Vehicle make / Fabrikaat (e.g. MERCEDES-BENZ, AUDI, TOYOTA)",
-  "description": "Vehicle description / Beskrywing (e.g. Coupe (closed top), Coupe (open top))",
-  "fees": "Fees / Gelde amount",
-  "gvm_kg": "Gross Vehicle Mass in kg",
-  "tare_kg": "Tare mass in kg",
+  "description": "Vehicle description / Beskrywing (e.g. COUPE (closed top), COUPE (open top))",
+  "fees": "Fees / Gelde amount — this is a small decimal number like 2.2, NOT a weight",
+  "gvm_kg": "Gross Vehicle Mass — labelled GVM/BVM on the right side, in kg (e.g. 2020)",
+  "tare_kg": "Tare weight — labelled Tare/Tarra on the right side, in kg (e.g. 1685)",
   "date_of_test": "Date of test / Datum van toets (YYYY-MM-DD)",
-  "persons_seated": "Number of seated persons",
-  "persons_standing": "Number of standing persons",
-  "date_of_expiry": "Date of expiry / Vervaldatum (YYYY-MM-DD)",
-  "country": "Country code shown on disc (e.g. RSA)"
+  "persons_seated": "Number of seated persons from Persone line (e.g. 2)",
+  "persons_standing": "Number of standing persons from Sittende/Standing line (e.g. 0)",
+  "date_of_expiry": "Date of expiry / Vervaldatum — the large date at bottom (YYYY-MM-DD)",
+  "country": "Country code shown on disc (RSA)"
 }
 
-Important:
+Important rules:
+- ROTATION: You MUST correctly orient the image before reading. Misreading due to rotation is the #1 failure mode.
 - Dates must be in YYYY-MM-DD format.
-- Numeric fields (fees, gvm_kg, tare_kg, persons_seated, persons_standing) should be numbers, not strings.
-- If a number has a unit suffix like "kg" on the disc, strip it and return the bare number.
+- fees is a small decimal (e.g. 2.2), NOT a year or weight. It appears next to "Fees/Gelde" on the right side.
+- gvm_kg and tare_kg are 4-digit numbers (e.g. 2020, 1685) next to "GVM/BVM" and "Tare/Tarra" on the right side.
+- persons_seated comes from "Persone: NNN" (usually 002 = 2 people). persons_standing from "Sittende NNN" (usually 000 = 0).
+- The VIN is always exactly 17 alphanumeric characters.
 - Return ONLY the raw JSON object. No markdown fences, no explanation."""
 
 
