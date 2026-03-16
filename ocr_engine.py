@@ -209,3 +209,108 @@ def extract_licence_disc_debug(image_bytes: bytes, content_type: str = "image/jp
         "result": result,
         "_debug": {"raw_response": raw_text},
     }
+
+
+# ---------------------------------------------------------------------------
+# SA Driver's Licence extraction
+# ---------------------------------------------------------------------------
+
+DRIVERS_LICENCE_PROMPT = """You are an expert OCR system specialised in South African driving licence cards.
+
+The card may be photographed at any angle, rotated, or have glare. Handle this gracefully.
+
+South African driving licence card layout:
+- Top: "DRIVING LICENCE" and "SOUTH AFRICA" with SADC ZA logo
+- "CARTA DE CONDUCAO" (Portuguese translation)
+- Full name (surname and initials)
+- ID Number (13-digit SA ID number, may have prefix like 02/)
+- Gender: MALE or FEMALE
+- Birth date: DD/MM/YYYY format followed by country code (ZA)
+- Restriction code (usually 1 or 0)
+- Licence Number: alphanumeric (e.g. 603900029FXH)
+- No.: card number (usually 1, 2, etc.)
+- Valid: start date - end date (DD/MM/YYYY - DD/MM/YYYY)
+- Issued: country code (ZA)
+- Code: licence code (A, A1, B, C, C1, EC, EC1, etc.)
+- Vehicle restriction: number (usually 0)
+- First Issue: DD/MM/YYYY
+- Photo on the right side
+- Signature at the bottom
+
+Extract every field visible on the card.
+
+Return ONLY a JSON object (no markdown, no commentary) with exactly these keys.
+If a field is not visible or unreadable, set its value to null.
+
+{
+  "full_name": "Full name as printed (e.g. RH VENTER)",
+  "id_number": "13-digit SA ID number only, without any prefix like 02/ (e.g. 9801135087080)",
+  "id_number_full": "Full ID field as printed including prefix (e.g. 02/9801135087080)",
+  "gender": "MALE or FEMALE",
+  "date_of_birth": "Date of birth in YYYY-MM-DD format",
+  "country": "Country code (e.g. ZA)",
+  "restriction": "Restriction code number",
+  "licence_number": "Licence number (e.g. 603900029FXH)",
+  "card_number": "Card number from No. field (e.g. 1)",
+  "valid_from": "Valid start date in YYYY-MM-DD format",
+  "valid_to": "Valid end date in YYYY-MM-DD format",
+  "issued_country": "Issued country code (e.g. ZA)",
+  "licence_code": "Licence code (e.g. B, A, C1, EC)",
+  "vehicle_restriction": "Vehicle restriction code (e.g. 0)",
+  "first_issue_date": "First issue date in YYYY-MM-DD format"
+}
+
+Important rules:
+- All dates must be converted to YYYY-MM-DD format (the card shows DD/MM/YYYY).
+- id_number should be the raw 13-digit number WITHOUT any prefix.
+- id_number_full should include the prefix exactly as printed (e.g. 02/9801135087080).
+- licence_code is the letter code (A, B, C, C1, EC, etc.), NOT the licence number.
+- Numeric fields (restriction, card_number, vehicle_restriction) should be numbers, not strings.
+- Return ONLY the raw JSON object. No markdown fences, no explanation."""
+
+
+def extract_drivers_licence(image_bytes: bytes, content_type: str = "image/jpeg") -> dict:
+    """
+    Extract all fields from a SA driving licence card using Claude Vision.
+
+    Args:
+        image_bytes: Raw image file bytes.
+        content_type: MIME type of the image.
+
+    Returns:
+        Dict with extracted fields. Unreadable fields are None.
+    """
+    client = anthropic.Anthropic()
+    b64_data, media_type = _prepare_image(image_bytes, content_type)
+
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": b64_data,
+                    },
+                },
+                {"type": "text", "text": DRIVERS_LICENCE_PROMPT},
+            ],
+        }],
+    )
+
+    raw_text = message.content[0].text.strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.split("\n", 1)[1]
+    if raw_text.endswith("```"):
+        raw_text = raw_text.rsplit("```", 1)[0]
+    raw_text = raw_text.strip()
+
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        logger.error("Failed to parse Claude response for drivers licence:\n%s", raw_text)
+        return {"_raw_response": raw_text, "_parse_error": True}

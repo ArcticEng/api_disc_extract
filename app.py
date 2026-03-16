@@ -21,7 +21,7 @@ from flask_cors import CORS
 
 import database as db
 from auth import require_auth, require_admin
-from ocr_engine import extract_licence_disc, extract_licence_disc_debug
+from ocr_engine import extract_licence_disc, extract_licence_disc_debug, extract_drivers_licence
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -64,7 +64,8 @@ def index():
         "service": "SA Licence Disc OCR API",
         "version": "3.0.0 — Claude Vision",
         "endpoints": {
-            "POST   /extract":            "Extract disc data (requires API key)",
+            "POST   /extract":            "Extract licence disc data (requires API key)",
+            "POST   /extract-licence":    "Extract drivers licence data (requires API key)",
             "GET    /me":                  "Your account & usage info",
             "GET    /me/transactions":     "Your transaction history",
             "GET    /health":              "Health check",
@@ -186,6 +187,74 @@ def extract():
             status="error", error_message=str(exc), duration_ms=duration_ms,
         )
         logger.exception("Unexpected error")
+        return jsonify({"error": str(exc)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTHENTICATED — drivers licence extraction
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/extract-licence", methods=["POST"])
+@require_auth
+def extract_licence():
+    """
+    Extract data from a SA driving licence card.
+    Same auth and logging as /extract.
+    """
+    user = g.current_user
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+
+    if "image" in request.files:
+        file = request.files["image"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+        if not allowed_file(file.filename):
+            return jsonify({"error": f"Unsupported file type. Allowed: {sorted(ALLOWED_EXTENSIONS)}"}), 400
+        image_bytes = file.read()
+        content_type = file.content_type or "image/jpeg"
+    elif request.data:
+        image_bytes = request.data
+        content_type = request.content_type or "image/jpeg"
+    else:
+        return jsonify({"error": "No image provided."}), 400
+
+    if len(image_bytes) < 1000:
+        return jsonify({"error": "Image too small."}), 400
+
+    logger.info("User %s — extracting drivers licence  size=%d", user["email"], len(image_bytes))
+
+    start_ms = time.time()
+    try:
+        result = extract_drivers_licence(image_bytes, content_type)
+        duration_ms = int((time.time() - start_ms) * 1000)
+
+        txn_id = db.log_transaction(
+            user=user, request_ip=client_ip,
+            image_size_bytes=len(image_bytes), image_type=content_type,
+            status="success", extracted_data=result, duration_ms=duration_ms,
+        )
+        db.increment_usage(user["id"])
+
+        return jsonify({
+            "success": True,
+            "type": "drivers_licence",
+            "transaction_id": txn_id,
+            "data": result,
+            "usage": {
+                "requests_used": user["requests_used"] + 1,
+                "monthly_limit": user["monthly_limit"],
+                "plan": user["plan"],
+            },
+        })
+
+    except Exception as exc:
+        duration_ms = int((time.time() - start_ms) * 1000)
+        db.log_transaction(
+            user=user, request_ip=client_ip,
+            image_size_bytes=len(image_bytes), image_type=content_type,
+            status="error", error_message=str(exc), duration_ms=duration_ms,
+        )
+        logger.exception("Error extracting drivers licence")
         return jsonify({"error": str(exc)}), 500
 
 
