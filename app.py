@@ -39,7 +39,10 @@ logger = logging.getLogger(__name__)
 
 # Initialise database on startup
 db.init_db()
-logger.info("Database initialised at %s", db.DB_PATH)
+if db.USE_POSTGRES:
+    logger.info("Database initialised: PostgreSQL")
+else:
+    logger.info("Database initialised: SQLite at %s", db.DB_PATH)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,6 +81,7 @@ def health():
     return jsonify({
         "status": "ok",
         "ocr_engine": "tesseract-local",
+        "database": "postgresql" if db.USE_POSTGRES else "sqlite",
         "admin_configured": bool(os.environ.get("ADMIN_API_KEY")),
         "timestamp": datetime.utcnow().isoformat() + "Z",
     })
