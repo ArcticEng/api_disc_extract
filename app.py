@@ -1,7 +1,7 @@
 """
-South African License Disc OCR API  (v2.1 — Local OCR)
-========================================================
-- Local Tesseract OCR — no external API calls, zero cost
+South African License Disc OCR API  (v3.0 — Claude Vision)
+=============================================================
+- Claude Vision AI — handles any rotation, angle, or lighting
 - API-key authentication with subscription tiers
 - Per-user monthly rate limits
 - Full transaction logging (who, when, what, result)
@@ -11,6 +11,8 @@ South African License Disc OCR API  (v2.1 — Local OCR)
 import os
 import json
 import time
+import hashlib
+import urllib.parse
 import logging
 from datetime import datetime
 
@@ -60,7 +62,7 @@ def allowed_file(filename: str) -> bool:
 def index():
     return jsonify({
         "service": "SA Licence Disc OCR API",
-        "version": "2.1.0 — Local OCR",
+        "version": "3.0.0 — Claude Vision",
         "endpoints": {
             "POST   /extract":            "Extract disc data (requires API key)",
             "GET    /me":                  "Your account & usage info",
@@ -80,7 +82,8 @@ def index():
 def health():
     return jsonify({
         "status": "ok",
-        "ocr_engine": "tesseract-local",
+        "ocr_engine": "claude-vision",
+        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "database": "postgresql" if db.USE_POSTGRES else "sqlite",
         "admin_configured": bool(os.environ.get("ADMIN_API_KEY")),
         "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -356,6 +359,134 @@ def admin_reset_usage():
     db.reset_monthly_usage()
     logger.info("Admin reset monthly usage counters for all users.")
     return jsonify({"message": "Monthly usage counters reset for all users."})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PAYMENT / PAYFAST ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+PAYFAST_MERCHANT_ID = os.environ.get("PAYFAST_MERCHANT_ID", "10000100")  # sandbox default
+PAYFAST_MERCHANT_KEY = os.environ.get("PAYFAST_MERCHANT_KEY", "46f0cd694581a")  # sandbox default
+PAYFAST_PASSPHRASE = os.environ.get("PAYFAST_PASSPHRASE", "")  # optional
+PAYFAST_SANDBOX = os.environ.get("PAYFAST_SANDBOX", "true").lower() == "true"
+PAYFAST_URL = "https://sandbox.payfast.co.za/eng/process" if PAYFAST_SANDBOX else "https://www.payfast.co.za/eng/process"
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+
+
+def _payfast_signature(data: dict) -> str:
+    """Generate PayFast MD5 signature."""
+    # Build query string in the order PayFast expects
+    params = urllib.parse.urlencode(data)
+    if PAYFAST_PASSPHRASE:
+        params += f"&passphrase={urllib.parse.quote_plus(PAYFAST_PASSPHRASE)}"
+    return hashlib.md5(params.encode()).hexdigest()
+
+
+@app.route("/api/create-payment", methods=["POST"])
+def create_payment():
+    """
+    Create a pending payment and return PayFast form fields.
+    Frontend uses these to redirect user to PayFast.
+    """
+    body = request.get_json(force=True)
+    email = body.get("email", "").strip()
+    name = body.get("name", "").strip()
+    plan = body.get("plan", "").strip()
+    company = body.get("company", "").strip() or None
+
+    if not email or not name or not plan:
+        return jsonify({"error": "email, name, and plan are required."}), 400
+
+    if plan not in db.PLAN_PRICING:
+        return jsonify({"error": f"Invalid plan. Choose from: {list(db.PLAN_PRICING.keys())}"}), 400
+
+    # Check if email already exists
+    existing = db.get_user_by_email(email)
+    if existing:
+        return jsonify({"error": "An account with this email already exists. Please use a different email."}), 409
+
+    try:
+        payment = db.create_payment(email=email, name=name, plan=plan, company=company)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    pricing = db.PLAN_PRICING[plan]
+
+    # Build PayFast form data
+    pf_data = {
+        "merchant_id": PAYFAST_MERCHANT_ID,
+        "merchant_key": PAYFAST_MERCHANT_KEY,
+        "return_url": f"{FRONTEND_URL}/success.html?ref={payment['id']}",
+        "cancel_url": f"{FRONTEND_URL}/#pricing",
+        "notify_url": f"{request.url_root.rstrip('/')}/webhook/payfast",
+        "name_first": name.split()[0] if name else name,
+        "name_last": " ".join(name.split()[1:]) if len(name.split()) > 1 else "",
+        "email_address": email,
+        "m_payment_id": payment["id"],
+        "amount": pricing["amount"],
+        "item_name": f"DiscDecode {pricing['name']} Plan - {pricing['limit']} lookups/month",
+        "item_description": f"Monthly subscription for {pricing['limit']} licence disc lookups",
+    }
+
+    pf_data["signature"] = _payfast_signature(pf_data)
+
+    return jsonify({
+        "payment_id": payment["id"],
+        "payfast_url": PAYFAST_URL,
+        "payfast_data": pf_data,
+    })
+
+
+@app.route("/webhook/payfast", methods=["POST"])
+def payfast_webhook():
+    """Receive PayFast ITN (Instant Transaction Notification)."""
+    data = request.form.to_dict()
+    logger.info("PayFast ITN received: m_payment_id=%s status=%s",
+                data.get("m_payment_id"), data.get("payment_status"))
+
+    payment_id = data.get("m_payment_id")
+    payment_status = data.get("payment_status")
+    pf_payment_id = data.get("pf_payment_id")
+
+    if not payment_id:
+        return "missing m_payment_id", 400
+
+    # Only process COMPLETE payments
+    if payment_status != "COMPLETE":
+        logger.info("PayFast ITN: status=%s (not COMPLETE), skipping.", payment_status)
+        return "ok", 200
+
+    try:
+        result = db.complete_payment(payment_id, payfast_payment_id=pf_payment_id)
+        if result:
+            logger.info("Payment %s completed. User created: %s", payment_id, result.get("email"))
+        else:
+            logger.warning("Payment %s not found or already processed.", payment_id)
+    except Exception as exc:
+        logger.exception("Error processing PayFast ITN for %s", payment_id)
+        return "error", 500
+
+    return "ok", 200
+
+
+@app.route("/api/payment-status/<payment_id>", methods=["GET"])
+def payment_status(payment_id):
+    """Check payment status. Returns API key if payment is complete."""
+    payment = db.get_payment(payment_id)
+    if not payment:
+        return jsonify({"error": "Payment not found."}), 404
+
+    result = {
+        "status": payment["status"],
+        "plan": payment["plan"],
+        "email": payment["email"],
+    }
+
+    if payment["status"] == "complete":
+        result["api_key"] = payment["api_key"]
+        result["monthly_limit"] = payment["monthly_limit"]
+
+    return jsonify(result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -93,6 +93,22 @@ def _fetchall(conn, sql, params=None):
 # ---------------------------------------------------------------------------
 
 _PG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS payments (
+    id              VARCHAR(36) PRIMARY KEY,
+    email           VARCHAR(255) NOT NULL,
+    name            VARCHAR(255) NOT NULL,
+    company         VARCHAR(255),
+    plan            VARCHAR(20) NOT NULL,
+    amount          VARCHAR(10) NOT NULL,
+    monthly_limit   INTEGER NOT NULL,
+    status          VARCHAR(20) DEFAULT 'pending',
+    payfast_payment_id VARCHAR(100),
+    user_id         VARCHAR(36),
+    api_key         VARCHAR(255),
+    created_at      VARCHAR(30) NOT NULL,
+    completed_at    VARCHAR(30)
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id              VARCHAR(36) PRIMARY KEY,
     email           VARCHAR(255) NOT NULL UNIQUE,
@@ -140,6 +156,22 @@ CREATE INDEX IF NOT EXISTS idx_transaction_log_vehicle_reg
 """
 
 _SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS payments (
+    id              TEXT PRIMARY KEY,
+    email           TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    company         TEXT,
+    plan            TEXT NOT NULL,
+    amount          TEXT NOT NULL,
+    monthly_limit   INTEGER NOT NULL,
+    status          TEXT DEFAULT 'pending',
+    payfast_payment_id TEXT,
+    user_id         TEXT,
+    api_key         TEXT,
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id              TEXT PRIMARY KEY,
     email           TEXT NOT NULL UNIQUE,
@@ -209,6 +241,7 @@ PLAN_LIMITS = {
     "basic":      100,
     "pro":        1000,
     "enterprise": 100_000,
+    "admin":      999_999_999,
 }
 
 
@@ -331,8 +364,9 @@ def check_subscription(user: dict) -> tuple[bool, str]:
         return False, "Account is deactivated. Contact support."
     if user["requests_used"] >= user["monthly_limit"]:
         return False, (
-            f"Monthly limit reached ({user['monthly_limit']} requests on "
-            f"'{user['plan']}' plan). Upgrade your plan or wait for the next cycle.")
+            f"Lookup limit reached ({user['monthly_limit']} lookups on your "
+            f"'{user['plan']}' plan). Please purchase additional lookups at "
+            f"https://onyxdigital.co.za/DiscDecode/#pricing")
     return True, "ok"
 
 
@@ -396,6 +430,83 @@ def get_transactions(user_id: str | None = None, limit: int = 50, offset: int = 
 def get_transaction_by_id(txn_id: str) -> dict | None:
     with get_db() as conn:
         return _fetchone(conn, "SELECT * FROM transaction_log WHERE id = ?", (txn_id,))
+
+
+# ---------------------------------------------------------------------------
+# Payments
+# ---------------------------------------------------------------------------
+
+PLAN_PRICING = {
+    "starter":    {"amount": "9.00",   "limit": 1,    "name": "Starter"},
+    "growth":     {"amount": "49.00",  "limit": 10,   "name": "Growth"},
+    "business":   {"amount": "89.00",  "limit": 1000, "name": "Business"},
+}
+
+
+def create_payment(email: str, name: str, plan: str, company: str = None) -> dict:
+    """Create a pending payment record."""
+    pricing = PLAN_PRICING.get(plan)
+    if not pricing:
+        raise ValueError(f"Invalid plan: {plan}")
+
+    payment_id = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat() + "Z"
+
+    with get_db() as conn:
+        _execute(conn, """
+            INSERT INTO payments (id, email, name, company, plan, amount,
+                                 monthly_limit, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        """, (payment_id, email, name, company, plan, pricing["amount"],
+              pricing["limit"], now))
+
+    return {
+        "id": payment_id, "email": email, "name": name,
+        "plan": plan, "amount": pricing["amount"],
+        "monthly_limit": pricing["limit"],
+    }
+
+
+def complete_payment(payment_id: str, payfast_payment_id: str = None) -> dict | None:
+    """
+    Mark payment as complete. Creates a user account and stores the API key.
+    Returns the payment record with api_key, or None if not found.
+    """
+    with get_db() as conn:
+        payment = _fetchone(conn, "SELECT * FROM payments WHERE id = ?", (payment_id,))
+        if not payment or payment["status"] == "complete":
+            return payment  # already processed or not found
+
+        # Create the user
+        user = create_user(
+            email=payment["email"],
+            name=payment["name"],
+            company=payment.get("company"),
+            plan=payment["plan"],
+        )
+
+        # Update monthly_limit to match the plan pricing
+        pricing = PLAN_PRICING.get(payment["plan"], {})
+        limit = pricing.get("limit", payment["monthly_limit"])
+        _execute(conn, "UPDATE users SET monthly_limit = ? WHERE id = ?",
+                 (limit, user["id"]))
+
+        now = datetime.utcnow().isoformat() + "Z"
+        _execute(conn, """
+            UPDATE payments SET status = 'complete', payfast_payment_id = ?,
+                   user_id = ?, api_key = ?, completed_at = ?
+            WHERE id = ?
+        """, (payfast_payment_id, user["id"], user["api_key"], now, payment_id))
+
+        payment["status"] = "complete"
+        payment["api_key"] = user["api_key"]
+        payment["user_id"] = user["id"]
+        return payment
+
+
+def get_payment(payment_id: str) -> dict | None:
+    with get_db() as conn:
+        return _fetchone(conn, "SELECT * FROM payments WHERE id = ?", (payment_id,))
 
 
 def get_user_stats(user_id: str) -> dict:
