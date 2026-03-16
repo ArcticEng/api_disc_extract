@@ -1,0 +1,363 @@
+"""
+South African License Disc OCR API  (v2.1 — Local OCR)
+========================================================
+- Local Tesseract OCR — no external API calls, zero cost
+- API-key authentication with subscription tiers
+- Per-user monthly rate limits
+- Full transaction logging (who, when, what, result)
+- Admin endpoints for user + log management
+"""
+
+import os
+import json
+import time
+import logging
+from datetime import datetime
+
+from flask import Flask, request, jsonify, g
+from flask_cors import CORS
+
+import database as db
+from auth import require_auth, require_admin
+from ocr_engine import extract_licence_disc, extract_licence_disc_debug
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"}
+MAX_CONTENT_LENGTH = 20 * 1024 * 1024  # 20 MB
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
+CORS(app)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# Initialise database on startup
+db.init_db()
+logger.info("Database initialised at %s", db.DB_PATH)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def allowed_file(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PUBLIC ROUTES
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({
+        "service": "SA Licence Disc OCR API",
+        "version": "2.1.0 — Local OCR",
+        "endpoints": {
+            "POST   /extract":            "Extract disc data (requires API key)",
+            "GET    /me":                  "Your account & usage info",
+            "GET    /me/transactions":     "Your transaction history",
+            "GET    /health":              "Health check",
+            "POST   /admin/users":         "Create a user  (admin)",
+            "GET    /admin/users":         "List all users (admin)",
+            "PATCH  /admin/users/:id":     "Update a user  (admin)",
+            "POST   /admin/users/:id/regenerate-key": "Regenerate API key (admin)",
+            "GET    /admin/transactions":  "All transaction logs (admin)",
+            "POST   /admin/reset-usage":   "Reset monthly counters (admin)",
+        },
+    })
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "ocr_engine": "tesseract-local",
+        "admin_configured": bool(os.environ.get("ADMIN_API_KEY")),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DEBUG endpoint (temporary — remove for production)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/debug-extract", methods=["POST"])
+@require_auth
+def debug_extract():
+    """Debug endpoint: returns raw OCR text alongside extracted fields."""
+    user = g.current_user
+    if "image" in request.files:
+        image_bytes = request.files["image"].read()
+        content_type = request.files["image"].content_type or "image/jpeg"
+    elif request.data:
+        image_bytes = request.data
+        content_type = request.content_type or "image/jpeg"
+    else:
+        return jsonify({"error": "No image provided."}), 400
+
+    result = extract_licence_disc_debug(image_bytes, content_type)
+    return jsonify(result)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTHENTICATED — extraction endpoint
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/extract", methods=["POST"])
+@require_auth
+def extract():
+    """
+    Authenticated endpoint: extract licence disc data from an uploaded image.
+    Logs the transaction and increments the user's usage counter.
+    """
+    user = g.current_user
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+
+    # ── Parse image from request ──────────────────────────────────────────
+    if "image" in request.files:
+        file = request.files["image"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+        if not allowed_file(file.filename):
+            return jsonify({"error": f"Unsupported file type. Allowed: {sorted(ALLOWED_EXTENSIONS)}"}), 400
+        image_bytes = file.read()
+        content_type = file.content_type or "image/jpeg"
+    elif request.data:
+        image_bytes = request.data
+        content_type = request.content_type or "image/jpeg"
+    else:
+        return jsonify({"error": "No image provided. Send as multipart 'image' field or raw body."}), 400
+
+    if len(image_bytes) < 1000:
+        return jsonify({"error": "Image too small — likely not a valid photo."}), 400
+
+    logger.info(
+        "User %s (%s) — extracting disc  size=%d  type=%s",
+        user["email"], user["plan"], len(image_bytes), content_type,
+    )
+
+    # ── Run local OCR extraction ─────────────────────────────────────────
+    start_ms = time.time()
+    try:
+        result = extract_licence_disc(image_bytes, content_type)
+        duration_ms = int((time.time() - start_ms) * 1000)
+
+        # Log success
+        txn_id = db.log_transaction(
+            user=user,
+            request_ip=client_ip,
+            image_size_bytes=len(image_bytes),
+            image_type=content_type,
+            status="success",
+            extracted_data=result,
+            duration_ms=duration_ms,
+        )
+        db.increment_usage(user["id"])
+
+        return jsonify({
+            "success": True,
+            "transaction_id": txn_id,
+            "data": result,
+            "usage": {
+                "requests_used": user["requests_used"] + 1,
+                "monthly_limit": user["monthly_limit"],
+                "plan": user["plan"],
+            },
+        })
+
+    except Exception as exc:
+        duration_ms = int((time.time() - start_ms) * 1000)
+        db.log_transaction(
+            user=user, request_ip=client_ip,
+            image_size_bytes=len(image_bytes), image_type=content_type,
+            status="error", error_message=str(exc), duration_ms=duration_ms,
+        )
+        logger.exception("Unexpected error")
+        return jsonify({"error": str(exc)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTHENTICATED — self-service account info
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/me", methods=["GET"])
+@require_auth
+def me():
+    """Return the authenticated user's account details and usage stats."""
+    user = g.current_user
+    stats = db.get_user_stats(user["id"])
+    return jsonify({
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "company": user["company"],
+            "plan": user["plan"],
+            "is_active": bool(user["is_active"]),
+            "monthly_limit": user["monthly_limit"],
+            "requests_used": user["requests_used"],
+            "billing_cycle_start": user["billing_cycle_start"],
+            "created_at": user["created_at"],
+        },
+        "stats": stats,
+    })
+
+
+@app.route("/me/transactions", methods=["GET"])
+@require_auth
+def my_transactions():
+    """Return the authenticated user's transaction history."""
+    user = g.current_user
+    limit = min(int(request.args.get("limit", 50)), 200)
+    offset = int(request.args.get("offset", 0))
+    txns = db.get_transactions(user_id=user["id"], limit=limit, offset=offset)
+
+    # Redact raw extracted_data in list view for brevity
+    for t in txns:
+        if t.get("extracted_data"):
+            t["extracted_data"] = "(available in detail view)"
+
+    return jsonify({"transactions": txns, "count": len(txns), "limit": limit, "offset": offset})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADMIN ROUTES
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/admin/users", methods=["POST"])
+@require_admin
+def admin_create_user():
+    """Create a new user account. Returns the API key (shown once)."""
+    body = request.get_json(force=True)
+    email = body.get("email")
+    name = body.get("name")
+    company = body.get("company")
+    plan = body.get("plan", "free")
+
+    if not email or not name:
+        return jsonify({"error": "email and name are required."}), 400
+
+    if plan not in db.PLAN_LIMITS:
+        return jsonify({"error": f"Invalid plan. Choose from: {list(db.PLAN_LIMITS.keys())}"}), 400
+
+    if db.get_user_by_email(email):
+        return jsonify({"error": f"A user with email '{email}' already exists."}), 409
+
+    user = db.create_user(email=email, name=name, company=company, plan=plan)
+    logger.info("Admin created user %s (%s) on plan=%s", email, user["id"], plan)
+
+    return jsonify({
+        "message": "User created. The API key below is shown ONCE — store it securely.",
+        "user": user,
+    }), 201
+
+
+@app.route("/admin/users", methods=["GET"])
+@require_admin
+def admin_list_users():
+    users = db.list_users()
+    return jsonify({"users": users, "count": len(users)})
+
+
+@app.route("/admin/users/<user_id>", methods=["GET"])
+@require_admin
+def admin_get_user(user_id):
+    user = db.get_user_by_id(user_id)
+    if not user:
+        return jsonify({"error": "User not found."}), 404
+    stats = db.get_user_stats(user_id)
+    user.pop("api_key", None)
+    user.pop("api_key_hash", None)
+    return jsonify({"user": user, "stats": stats})
+
+
+@app.route("/admin/users/<user_id>", methods=["PATCH"])
+@require_admin
+def admin_update_user(user_id):
+    """Update user fields: name, company, plan, is_active, monthly_limit."""
+    body = request.get_json(force=True)
+    if not db.get_user_by_id(user_id):
+        return jsonify({"error": "User not found."}), 404
+
+    updated = db.update_user(user_id, **body)
+    if not updated:
+        return jsonify({"error": "No valid fields to update."}), 400
+
+    return jsonify({"message": "User updated.", "user": db.get_user_by_id(user_id)})
+
+
+@app.route("/admin/users/<user_id>/deactivate", methods=["POST"])
+@require_admin
+def admin_deactivate_user(user_id):
+    if db.deactivate_user(user_id):
+        return jsonify({"message": "User deactivated."})
+    return jsonify({"error": "User not found."}), 404
+
+
+@app.route("/admin/users/<user_id>/activate", methods=["POST"])
+@require_admin
+def admin_activate_user(user_id):
+    if db.activate_user(user_id):
+        return jsonify({"message": "User activated."})
+    return jsonify({"error": "User not found."}), 404
+
+
+@app.route("/admin/users/<user_id>/regenerate-key", methods=["POST"])
+@require_admin
+def admin_regenerate_key(user_id):
+    new_key = db.regenerate_api_key(user_id)
+    if new_key:
+        return jsonify({
+            "message": "API key regenerated. The old key is now invalid.",
+            "api_key": new_key,
+        })
+    return jsonify({"error": "User not found."}), 404
+
+
+@app.route("/admin/transactions", methods=["GET"])
+@require_admin
+def admin_transactions():
+    """Browse all transaction logs. Filter by ?user_id= optionally."""
+    user_id = request.args.get("user_id")
+    limit = min(int(request.args.get("limit", 50)), 500)
+    offset = int(request.args.get("offset", 0))
+    txns = db.get_transactions(user_id=user_id, limit=limit, offset=offset)
+    return jsonify({"transactions": txns, "count": len(txns), "limit": limit, "offset": offset})
+
+
+@app.route("/admin/transactions/<txn_id>", methods=["GET"])
+@require_admin
+def admin_transaction_detail(txn_id):
+    txn = db.get_transaction_by_id(txn_id)
+    if not txn:
+        return jsonify({"error": "Transaction not found."}), 404
+    if txn.get("extracted_data"):
+        try:
+            txn["extracted_data"] = json.loads(txn["extracted_data"])
+        except json.JSONDecodeError:
+            pass
+    return jsonify({"transaction": txn})
+
+
+@app.route("/admin/reset-usage", methods=["POST"])
+@require_admin
+def admin_reset_usage():
+    """Reset all users' monthly request counters."""
+    db.reset_monthly_usage()
+    logger.info("Admin reset monthly usage counters for all users.")
+    return jsonify({"message": "Monthly usage counters reset for all users."})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Entry-point
+# ═══════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host="0.0.0.0", port=port, debug=debug)
