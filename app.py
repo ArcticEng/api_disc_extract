@@ -21,7 +21,11 @@ from flask_cors import CORS
 
 import database as db
 from auth import require_auth, require_admin
-from ocr_engine import extract_licence_disc, extract_licence_disc_debug, extract_drivers_licence
+from ocr_engine import (
+    extract_licence_disc, extract_licence_disc_debug,
+    extract_drivers_licence, extract_document,
+    get_supported_doc_types,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -66,6 +70,8 @@ def index():
         "endpoints": {
             "POST   /extract":            "Extract licence disc data (requires API key)",
             "POST   /extract-licence":    "Extract drivers licence data (requires API key)",
+            "POST   /extract-doc":        "Extract ANY document — pass doc_type param (requires API key)",
+            "GET    /doc-types":           "List all supported document types",
             "GET    /me":                  "Your account & usage info",
             "GET    /me/transactions":     "Your transaction history",
             "GET    /health":              "Health check",
@@ -259,6 +265,94 @@ def extract_licence():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# GENERIC document extraction (any document type)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route("/doc-types", methods=["GET"])
+def list_doc_types():
+    """List all supported document types."""
+    return jsonify(get_supported_doc_types())
+
+
+@app.route("/extract-doc", methods=["POST"])
+@require_auth
+def extract_doc():
+    """
+    Extract data from ANY document type.
+    Pass doc_type as form field or query param.
+    Supported types: licence_disc, drivers_licence, id_document,
+                     vehicle_registration, invoice, generic
+    """
+    user = g.current_user
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+
+    # Get doc_type from form data, query param, or JSON
+    doc_type = (request.form.get("doc_type")
+                or request.args.get("doc_type")
+                or "generic")
+
+    supported = get_supported_doc_types()
+    if doc_type not in supported:
+        return jsonify({
+            "error": f"Unknown doc_type: '{doc_type}'",
+            "supported_types": supported,
+        }), 400
+
+    if "image" in request.files:
+        file = request.files["image"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+        if not allowed_file(file.filename):
+            return jsonify({"error": f"Unsupported file type. Allowed: {sorted(ALLOWED_EXTENSIONS)}"}), 400
+        image_bytes = file.read()
+        content_type = file.content_type or "image/jpeg"
+    elif request.data:
+        image_bytes = request.data
+        content_type = request.content_type or "image/jpeg"
+    else:
+        return jsonify({"error": "No image provided."}), 400
+
+    if len(image_bytes) < 1000:
+        return jsonify({"error": "Image too small."}), 400
+
+    logger.info("User %s — extracting %s  size=%d", user["email"], doc_type, len(image_bytes))
+
+    start_ms = time.time()
+    try:
+        result = extract_document(image_bytes, doc_type, content_type)
+        duration_ms = int((time.time() - start_ms) * 1000)
+
+        txn_id = db.log_transaction(
+            user=user, request_ip=client_ip,
+            image_size_bytes=len(image_bytes), image_type=content_type,
+            status="success", extracted_data=result, duration_ms=duration_ms,
+        )
+        db.increment_usage(user["id"])
+
+        return jsonify({
+            "success": True,
+            "type": doc_type,
+            "transaction_id": txn_id,
+            "data": result,
+            "usage": {
+                "requests_used": user["requests_used"] + 1,
+                "monthly_limit": user["monthly_limit"],
+                "plan": user["plan"],
+            },
+        })
+
+    except Exception as exc:
+        duration_ms = int((time.time() - start_ms) * 1000)
+        db.log_transaction(
+            user=user, request_ip=client_ip,
+            image_size_bytes=len(image_bytes), image_type=content_type,
+            status="error", error_message=str(exc), duration_ms=duration_ms,
+        )
+        logger.exception("Error extracting %s", doc_type)
+        return jsonify({"error": str(exc)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # AUTHENTICATED — self-service account info
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -434,10 +528,10 @@ def admin_reset_usage():
 # PAYMENT / PAYFAST ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-PAYFAST_MERCHANT_ID = os.environ.get("PAYFAST_MERCHANT_ID", "10000100")  # sandbox default
-PAYFAST_MERCHANT_KEY = os.environ.get("PAYFAST_MERCHANT_KEY", "46f0cd694581a")  # sandbox default
-PAYFAST_PASSPHRASE = os.environ.get("PAYFAST_PASSPHRASE", "jt7NOE43FZPn")  # sandbox default
-PAYFAST_SANDBOX = os.environ.get("PAYFAST_SANDBOX", "true").lower() == "true"
+PAYFAST_MERCHANT_ID = os.environ.get("PAYFAST_MERCHANT_ID")
+PAYFAST_MERCHANT_KEY = os.environ.get("PAYFAST_MERCHANT_KEY")
+PAYFAST_PASSPHRASE = os.environ.get("PAYFAST_PASSPHRASE", "")
+PAYFAST_SANDBOX = os.environ.get("PAYFAST_SANDBOX", "false").lower() == "true"
 PAYFAST_URL = "https://sandbox.payfast.co.za/eng/process" if PAYFAST_SANDBOX else "https://www.payfast.co.za/eng/process"
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
