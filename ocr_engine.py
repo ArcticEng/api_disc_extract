@@ -152,7 +152,7 @@ If a field is not visible or unreadable, set its value to `null`.
 
 {
   "disc_number": "The disc number after NO. (e.g. 1001056N64N8)",
-  "licence_number": "Licence / Lisensie number (e.g. CAA272324 or 1MAGIN8WP)",
+  "licence_number": "Licence / Lisensie number (e.g. CAA272324 or IMAGIN8WP)",
   "vehicle_register_number": "Vehicle registration / Vrt.registernr (e.g. WMH861W or HBH682K)",
   "vin": "Vehicle Identification Number — always exactly 17 characters (e.g. WUAZZFX2H7904038)",
   "engine_number": "Engine number / Enjinnr (e.g. CSP00683)",
@@ -175,6 +175,7 @@ Important rules:
 - gvm_kg and tare_kg are 4-digit numbers (e.g. 2020, 1685).
 - persons_seated comes from "Persone: NNN" (usually 002 = 2 people). persons_standing from "Sittende NNN" (usually 000 = 0).
 - The VIN is always exactly 17 alphanumeric characters.
+- licence_number is often a vanity/personalised plate. If it looks like it could spell a word (e.g. IMAGIN8WP = "Imagine WP"), prefer letters over digits. Specifically: a leading character that could be I or 1 should be the letter I if the rest forms a recognisable word.
 - Return ONLY the raw JSON object. No markdown fences, no explanation."""
 )
 

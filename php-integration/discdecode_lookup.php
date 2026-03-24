@@ -206,31 +206,46 @@ $usage         = $apiResponse['usage'] ?? [];
 $lookup_result = !empty($extractedData) ? 1 : 0;
 $not_billable  = $lookup_result ? 0 : 1;
 
-// Build search keys based on document type
+// === Map extracted fields per document type ===
+$vin             = '';
+$regNumber       = '';
+$make            = '';
+$searchKeys      = '';
+$searchType      = '';
+$vehicleYear     = 0;
+$discExpiry      = '';
+
 switch ($docType) {
+    case 'licence_disc':
+        $vin         = $extractedData['vin'] ?? '';
+        $regNumber   = $extractedData['licence_number'] ?? '';
+        $make        = $extractedData['make'] ?? '';
+        $discExpiry  = $extractedData['date_of_expiry'] ?? '';
+        $searchKeys  = $vin ?: $regNumber;
+        $searchType  = 'LicenceDisc';
+        break;
     case 'drivers_licence':
-        $searchKeys = $extractedData['id_number'] ?? $extractedData['licence_number'] ?? '';
-        $searchType = 'DriversLicence';
+        $searchKeys  = $extractedData['id_number'] ?? $extractedData['licence_number'] ?? '';
+        $searchType  = 'DriversLicence';
         break;
     case 'id_document':
-        $searchKeys = $extractedData['id_number'] ?? '';
-        $searchType = 'IDDocument';
+        $searchKeys  = $extractedData['id_number'] ?? '';
+        $searchType  = 'IDDocument';
         break;
     case 'vehicle_registration':
-        $searchKeys = $extractedData['vin'] ?? $extractedData['registration_number'] ?? '';
-        $searchType = 'VehicleReg';
+        $vin         = $extractedData['vin'] ?? '';
+        $regNumber   = $extractedData['licence_number'] ?? '';
+        $make        = $extractedData['make'] ?? '';
+        $searchKeys  = $vin ?: $regNumber;
+        $searchType  = 'VehicleReg';
         break;
     case 'invoice':
-        $searchKeys = $extractedData['invoice_number'] ?? '';
-        $searchType = 'Invoice';
+        $searchKeys  = $extractedData['invoice_number'] ?? '';
+        $searchType  = 'Invoice';
         break;
-    case 'generic':
-        $searchKeys = $extractedData['title'] ?? 'generic';
-        $searchType = 'Generic';
-        break;
-    default: // licence_disc
-        $searchKeys = $extractedData['vin'] ?? $extractedData['vehicle_register_number'] ?? '';
-        $searchType = 'LicenceDisc';
+    default:
+        $searchKeys  = $extractedData['title'] ?? 'generic';
+        $searchType  = 'Generic';
         break;
 }
 
@@ -247,25 +262,30 @@ try {
     $insertQuery = "INSERT INTO Transaction_log 
         (computerName, AppUsername, mmCode, clientRef, vehicle_year, remote_address, 
          software_application, request_uri, log_date, lookup_result, product_id, 
-         not_billable, SearchKeys, SearchType, SPEntityID, TransactionStatus, IM8TransRef)
+         not_billable, SearchKeys, SearchType, SPEntityID, TransactionStatus, IM8TransRef,
+         lookup_type, vin, reg)
         VALUES (:compName, :appUser, 0, :clientRef, 0, :address, :softApp, :requestUri, 
-         :log_date, :lookupResult, :prodId, :notBillable, :searchKeys, :searchType, :entity, 'P', '')";
+         :log_date, :lookupResult, :prodId, :notBillable, :searchKeys, :searchType, :entity, 'P', '',
+         :lookupType, :vin, :reg)";
 
     $stmt = $DB1->prepare($insertQuery);
     $stmt->execute([
-        ':compName'     => $computerName,
-        ':appUser'      => $appUsername,
-        ':clientRef'    => $clientRef,
-        ':address'      => $remoteAddress,
-        ':softApp'      => $software_app,
-        ':requestUri'   => $request_uri,
-        ':log_date'     => $date,
-        ':lookupResult' => $lookup_result,
-        ':prodId'       => "400",
-        ':notBillable'  => $not_billable,
-        ':searchKeys'   => $searchKeys,
-        ':searchType'   => $searchType,
-        ':entity'       => $entityID,
+        ':compName'      => $computerName,
+        ':appUser'       => $appUsername,
+        ':clientRef'     => $clientRef,
+        ':address'       => $remoteAddress,
+        ':softApp'       => $software_app,
+        ':requestUri'    => $request_uri,
+        ':log_date'      => $date,
+        ':lookupResult'  => $lookup_result,
+        ':prodId'        => "400",
+        ':notBillable'   => $not_billable,
+        ':searchKeys'    => $searchKeys,
+        ':searchType'    => $searchType,
+        ':entity'        => $entityID,
+        ':lookupType'    => $searchType,
+        ':vin'           => $vin,
+        ':reg'           => $regNumber,
     ]);
 
     $logIdRef = $DB1->lastInsertId();
