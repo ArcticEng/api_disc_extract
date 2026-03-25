@@ -58,6 +58,40 @@ def _prepare_image(image_bytes: bytes, content_type: str) -> tuple[str, str]:
 # Claude Vision call (shared by all document types)
 # ---------------------------------------------------------------------------
 
+def _validate_vin(vin: str) -> str:
+    """Validate and attempt to fix a VIN that isn't exactly 17 characters."""
+    if not vin or vin == 'null':
+        return vin
+    # Strip whitespace
+    vin = vin.strip().upper()
+    if len(vin) == 17:
+        return vin
+    if len(vin) < 17:
+        # VIN too short — likely dropped a repeated character
+        # Common: ZZZ → ZZ, SSS → SS, 000 → 00, 111 → 11
+        diff = 17 - len(vin)
+        # Find runs of repeated chars and try expanding the longest one
+        best_fix = vin
+        best_pos = -1
+        best_run_len = 0
+        i = 0
+        while i < len(vin):
+            j = i
+            while j < len(vin) and vin[j] == vin[i]:
+                j += 1
+            run_len = j - i
+            if run_len >= 2 and run_len > best_run_len:
+                best_run_len = run_len
+                best_pos = i
+            i = j
+        if best_pos >= 0:
+            char = vin[best_pos]
+            best_fix = vin[:best_pos] + char * (best_run_len + diff) + vin[best_pos + best_run_len:]
+        if len(best_fix) == 17:
+            return best_fix
+    return vin
+
+
 def _call_vision(image_bytes: bytes, content_type: str, prompt: str) -> dict:
     """Send image + prompt to Claude Vision and return parsed JSON."""
     client = anthropic.Anthropic()
@@ -90,7 +124,15 @@ def _call_vision(image_bytes: bytes, content_type: str, prompt: str) -> dict:
     raw_text = raw_text.strip()
 
     try:
-        return json.loads(raw_text)
+        result = json.loads(raw_text)
+        # Post-process: validate VIN length
+        if isinstance(result, dict) and 'vin' in result and result['vin']:
+            original_vin = result['vin']
+            fixed_vin = _validate_vin(original_vin)
+            if fixed_vin != original_vin:
+                logger.info("VIN fixed: %s → %s", original_vin, fixed_vin)
+                result['vin'] = fixed_vin
+        return result
     except json.JSONDecodeError:
         logger.error("Failed to parse Claude response:\n%s", raw_text)
         return {"_raw_response": raw_text, "_parse_error": True}
