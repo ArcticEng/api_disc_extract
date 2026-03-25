@@ -62,16 +62,14 @@ def _validate_vin(vin: str) -> str:
     """Validate and attempt to fix a VIN that isn't exactly 17 characters."""
     if not vin or vin == 'null':
         return vin
-    # Strip whitespace
     vin = vin.strip().upper()
     if len(vin) == 17:
         return vin
+
     if len(vin) < 17:
         # VIN too short — likely dropped a repeated character
-        # Common: ZZZ → ZZ, SSS → SS, 000 → 00, 111 → 11
+        # e.g. ZZZ → ZZ, SSS → SS
         diff = 17 - len(vin)
-        # Find runs of repeated chars and try expanding the longest one
-        best_fix = vin
         best_pos = -1
         best_run_len = 0
         i = 0
@@ -86,9 +84,71 @@ def _validate_vin(vin: str) -> str:
             i = j
         if best_pos >= 0:
             char = vin[best_pos]
-            best_fix = vin[:best_pos] + char * (best_run_len + diff) + vin[best_pos + best_run_len:]
-        if len(best_fix) == 17:
-            return best_fix
+            fixed = vin[:best_pos] + char * (best_run_len + diff) + vin[best_pos + best_run_len:]
+            if len(fixed) == 17:
+                return fixed
+
+    if len(vin) > 17 and len(vin) <= 19:
+        # VIN too long — likely inserted a stray character near a repeated run
+        # e.g. WUAZZZ2FX → should be WUAZZZFX (stray 2 inserted)
+        # Strategy: try removing each char, pick the result with the longest
+        # repeated run (most natural-looking VIN)
+        extra = len(vin) - 17
+        if extra == 1:
+            best_candidate = None
+            best_score = -999
+            for i in range(len(vin)):
+                candidate = vin[:i] + vin[i + 1:]
+                left = vin[i - 1] if i > 0 else None
+                right = vin[i + 1] if i + 1 < len(vin) else None
+                removed = vin[i]
+                # Never break a repeated run
+                if left and removed == left:
+                    continue
+                if right and removed == right:
+                    continue
+                # Protect WMI (first 3 chars) and serial (last 6) —
+                # OCR stray chars almost always appear in the middle section
+                score = 0
+                if i < 3:
+                    score -= 20  # Heavily penalise removing from WMI
+                elif i >= len(vin) - 6:
+                    score -= 10  # Penalise removing from serial number
+                # Prefer removing a digit surrounded by letters, or vice versa
+                if left and right:
+                    left_is_alpha = left.isalpha()
+                    right_is_alpha = right.isalpha()
+                    removed_is_alpha = removed.isalpha()
+                    # Stray: digit between two letters, or letter between two digits
+                    if left_is_alpha and right_is_alpha and not removed_is_alpha:
+                        score += 10  # Digit between letters = very likely stray
+                    elif not left_is_alpha and not right_is_alpha and removed_is_alpha:
+                        score += 10  # Letter between digits = very likely stray
+                # Near a repeated run = more suspicious
+                for r in range(max(0, i - 2), min(len(vin) - 1, i + 2)):
+                    if vin[r] == vin[r + 1] and r != i and r + 1 != i:
+                        score += 5
+                        break
+                if score > best_score:
+                    best_score = score
+                    best_candidate = candidate
+            if best_candidate:
+                return best_candidate
+        elif extra == 2:
+            # Remove one char at a time, recurse
+            for i in range(len(vin)):
+                left = vin[i - 1] if i > 0 else None
+                right = vin[i + 1] if i + 1 < len(vin) else None
+                removed = vin[i]
+                if left and removed == left:
+                    continue
+                if right and removed == right:
+                    continue
+                candidate = vin[:i] + vin[i + 1:]
+                fixed = _validate_vin(candidate)
+                if len(fixed) == 17:
+                    return fixed
+
     return vin
 
 
