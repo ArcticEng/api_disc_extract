@@ -174,7 +174,7 @@ Important rules:
 - fees is a small decimal (e.g. 2.2), NOT a year or weight.
 - gvm_kg and tare_kg are 4-digit numbers (e.g. 2020, 1685).
 - persons_seated comes from "Persone: NNN" (usually 002 = 2 people). persons_standing from "Sittende NNN" (usually 000 = 0).
-- The VIN is always exactly 17 alphanumeric characters.
+- The VIN is ALWAYS exactly 17 alphanumeric characters. If your extracted VIN has fewer than 17 characters, you have missed a character — re-read it carefully. Common errors: missing repeated letters (e.g. ZZZ read as ZZ, SSS read as SS). Count the characters and verify before returning.
 - licence_number is often a vanity/personalised plate. If it looks like it could spell a word (e.g. IMAGIN8WP = "Imagine WP"), prefer letters over digits. Specifically: a leading character that could be I or 1 should be the letter I if the rest forms a recognisable word.
 - Return ONLY the raw JSON object. No markdown fences, no explanation."""
 )
