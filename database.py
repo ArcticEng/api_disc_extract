@@ -154,10 +154,6 @@ CREATE INDEX IF NOT EXISTS idx_transaction_log_created_at
     ON transaction_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_transaction_log_vehicle_reg
     ON transaction_log(vehicle_reg);
-CREATE INDEX IF NOT EXISTS idx_transaction_log_status
-    ON transaction_log(status);
-CREATE INDEX IF NOT EXISTS idx_transaction_log_doc_type
-    ON transaction_log(doc_type);
 """
 
 _SQLITE_SCHEMA = """
@@ -225,10 +221,6 @@ CREATE INDEX IF NOT EXISTS idx_transaction_log_created_at
     ON transaction_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_transaction_log_vehicle_reg
     ON transaction_log(vehicle_reg);
-CREATE INDEX IF NOT EXISTS idx_transaction_log_status
-    ON transaction_log(status);
-CREATE INDEX IF NOT EXISTS idx_transaction_log_doc_type
-    ON transaction_log(doc_type);
 """
 
 
@@ -259,6 +251,9 @@ def _run_migrations():
             """)
             if not cur.fetchone():
                 cur.execute("ALTER TABLE transaction_log ADD COLUMN doc_type VARCHAR(30)")
+            # Create indexes for new columns (safe if already exist)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_transaction_log_status ON transaction_log(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_transaction_log_doc_type ON transaction_log(doc_type)")
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("Migration warning: %s", e)
