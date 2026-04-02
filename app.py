@@ -22,7 +22,7 @@ from flask_cors import CORS
 import database as db
 from auth import require_auth, require_admin
 from ocr_engine import (
-    extract_licence_disc, extract_licence_disc_debug,
+    extract_licence_disc,
     extract_drivers_licence, extract_document,
     get_supported_doc_types,
 )
@@ -75,12 +75,6 @@ def index():
             "GET    /me":                  "Your account & usage info",
             "GET    /me/transactions":     "Your transaction history",
             "GET    /health":              "Health check",
-            "POST   /admin/users":         "Create a user  (admin)",
-            "GET    /admin/users":         "List all users (admin)",
-            "PATCH  /admin/users/:id":     "Update a user  (admin)",
-            "POST   /admin/users/:id/regenerate-key": "Regenerate API key (admin)",
-            "GET    /admin/transactions":  "All transaction logs (admin)",
-            "POST   /admin/reset-usage":   "Reset monthly counters (admin)",
         },
     })
 
@@ -95,28 +89,6 @@ def health():
         "admin_configured": bool(os.environ.get("ADMIN_API_KEY")),
         "timestamp": datetime.utcnow().isoformat() + "Z",
     })
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# DEBUG endpoint (temporary — remove for production)
-# ═══════════════════════════════════════════════════════════════════════════
-
-@app.route("/debug-extract", methods=["POST"])
-@require_auth
-def debug_extract():
-    """Debug endpoint: returns raw OCR text alongside extracted fields."""
-    user = g.current_user
-    if "image" in request.files:
-        image_bytes = request.files["image"].read()
-        content_type = request.files["image"].content_type or "image/jpeg"
-    elif request.data:
-        image_bytes = request.data
-        content_type = request.content_type or "image/jpeg"
-    else:
-        return jsonify({"error": "No image provided."}), 400
-
-    result = extract_licence_disc_debug(image_bytes, content_type)
-    return jsonify(result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -171,6 +143,7 @@ def extract():
             status="success",
             extracted_data=result,
             duration_ms=duration_ms,
+            doc_type="licence_disc",
         )
         db.increment_usage(user["id"])
 
@@ -191,6 +164,7 @@ def extract():
             user=user, request_ip=client_ip,
             image_size_bytes=len(image_bytes), image_type=content_type,
             status="error", error_message=str(exc), duration_ms=duration_ms,
+            doc_type="licence_disc",
         )
         logger.exception("Unexpected error")
         return jsonify({"error": str(exc)}), 500
@@ -238,6 +212,7 @@ def extract_licence():
             user=user, request_ip=client_ip,
             image_size_bytes=len(image_bytes), image_type=content_type,
             status="success", extracted_data=result, duration_ms=duration_ms,
+            doc_type="drivers_licence",
         )
         db.increment_usage(user["id"])
 
@@ -259,6 +234,7 @@ def extract_licence():
             user=user, request_ip=client_ip,
             image_size_bytes=len(image_bytes), image_type=content_type,
             status="error", error_message=str(exc), duration_ms=duration_ms,
+            doc_type="drivers_licence",
         )
         logger.exception("Error extracting drivers licence")
         return jsonify({"error": str(exc)}), 500
@@ -326,6 +302,7 @@ def extract_doc():
             user=user, request_ip=client_ip,
             image_size_bytes=len(image_bytes), image_type=content_type,
             status="success", extracted_data=result, duration_ms=duration_ms,
+            doc_type=doc_type,
         )
         db.increment_usage(user["id"])
 
@@ -347,6 +324,7 @@ def extract_doc():
             user=user, request_ip=client_ip,
             image_size_bytes=len(image_bytes), image_type=content_type,
             status="error", error_message=str(exc), duration_ms=duration_ms,
+            doc_type=doc_type,
         )
         logger.exception("Error extracting %s", doc_type)
         return jsonify({"error": str(exc)}), 500

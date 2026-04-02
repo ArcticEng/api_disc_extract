@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS transaction_log (
     vehicle_make    VARCHAR(50),
     vehicle_vin     VARCHAR(20),
     disc_expiry     VARCHAR(10),
+    doc_type        VARCHAR(30),
     duration_ms     INTEGER,
     created_at      VARCHAR(30) NOT NULL
 );
@@ -153,6 +154,10 @@ CREATE INDEX IF NOT EXISTS idx_transaction_log_created_at
     ON transaction_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_transaction_log_vehicle_reg
     ON transaction_log(vehicle_reg);
+CREATE INDEX IF NOT EXISTS idx_transaction_log_status
+    ON transaction_log(status);
+CREATE INDEX IF NOT EXISTS idx_transaction_log_doc_type
+    ON transaction_log(doc_type);
 """
 
 _SQLITE_SCHEMA = """
@@ -206,6 +211,7 @@ CREATE TABLE IF NOT EXISTS transaction_log (
     vehicle_make    TEXT,
     vehicle_vin     TEXT,
     disc_expiry     TEXT,
+    doc_type        TEXT,
     duration_ms     INTEGER,
     created_at      TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id)
@@ -219,17 +225,33 @@ CREATE INDEX IF NOT EXISTS idx_transaction_log_created_at
     ON transaction_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_transaction_log_vehicle_reg
     ON transaction_log(vehicle_reg);
+CREATE INDEX IF NOT EXISTS idx_transaction_log_status
+    ON transaction_log(status);
+CREATE INDEX IF NOT EXISTS idx_transaction_log_doc_type
+    ON transaction_log(doc_type);
 """
 
 
 def init_db():
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist, and run migrations."""
     with get_db() as conn:
         if USE_POSTGRES:
             cur = conn.cursor()
             cur.execute(_PG_SCHEMA)
+            # Migration: add doc_type column if missing
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'transaction_log' AND column_name = 'doc_type'
+            """)
+            if not cur.fetchone():
+                cur.execute("ALTER TABLE transaction_log ADD COLUMN doc_type VARCHAR(30)")
         else:
             conn.executescript(_SQLITE_SCHEMA)
+            # Migration: add doc_type column if missing
+            try:
+                conn.execute("ALTER TABLE transaction_log ADD COLUMN doc_type TEXT")
+            except Exception:
+                pass  # column already exists
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +402,7 @@ def log_transaction(
     extracted_data: dict | None = None,
     error_message: str | None = None,
     duration_ms: int | None = None,
+    doc_type: str | None = None,
 ) -> str:
     txn_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat() + "Z"
@@ -401,14 +424,14 @@ def log_transaction(
                  request_ip, image_size_bytes, image_type,
                  status, error_message, extracted_data,
                  vehicle_reg, vehicle_make, vehicle_vin, disc_expiry,
-                 duration_ms, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 doc_type, duration_ms, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             txn_id, user["id"], user["email"], user["name"], api_key_prefix,
             request_ip, image_size_bytes, image_type,
             status, error_message, extracted_json,
             vehicle_reg, vehicle_make, vehicle_vin, disc_expiry,
-            duration_ms, now,
+            doc_type, duration_ms, now,
         ))
     return txn_id
 

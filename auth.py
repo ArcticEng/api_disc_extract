@@ -5,8 +5,11 @@ checks subscription status and rate limits.
 """
 
 import functools
+import logging
 from flask import request, jsonify, g
 from database import get_user_by_api_key, check_subscription
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_api_key() -> str | None:
@@ -33,7 +36,11 @@ def require_auth(f):
     def wrapper(*args, **kwargs):
         api_key = _extract_api_key()
 
+        client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+
         if not api_key:
+            logger.warning("AUTH_FAIL: No API key provided from IP=%s path=%s",
+                          client_ip, request.path)
             return jsonify({
                 "error": "Authentication required.",
                 "detail": "Provide your API key via the X-API-Key header or "
@@ -43,6 +50,8 @@ def require_auth(f):
         user = get_user_by_api_key(api_key)
 
         if user is None:
+            logger.warning("AUTH_FAIL: Invalid API key prefix=%s... from IP=%s path=%s",
+                          api_key[:16], client_ip, request.path)
             return jsonify({
                 "error": "Invalid API key.",
             }), 401
@@ -50,6 +59,9 @@ def require_auth(f):
         # Subscription / rate-limit check
         allowed, reason = check_subscription(user)
         if not allowed:
+            logger.warning("RATE_LIMIT: user=%s plan=%s used=%d/%d from IP=%s",
+                          user["email"], user["plan"],
+                          user["requests_used"], user["monthly_limit"], client_ip)
             return jsonify({
                 "error": "Subscription check failed.",
                 "detail": reason,

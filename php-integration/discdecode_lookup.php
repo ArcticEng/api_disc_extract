@@ -1,26 +1,25 @@
 <?php
 /**
- * DiscDecode API Integration
+ * DocDecode API Integration (Imagin8)
  * 
- * Accepts an image + lookuptype, calls the DiscDecode /extract-doc API,
+ * Accepts an image + lookuptype, calls the DocDecode /extract-doc API,
  * logs the transaction, and returns JSON.
  *
  * Supported lookuptype values:
  *   disc, licence, id, registration, invoice, generic
  *
  * Usage:
- *   curl -X POST https://yourserver.com/discdecode_lookup.php \
+ *   curl -X POST https://www.evalue8.co.za/evalue8webservice/discdecode_lookup.php \
  *     -F "image=@disc.jpeg" \
- *     -F "apiKey=disc_live_..." \
  *     -F "lookuptype=disc" \
- *     -F "clientRef=REF123" \
+ *     -F "clientRef=12345" \
  *     -F "uname=rigard" \
  *     -F "comid=PC001" \
  *     -F "entityID=1"
  */
 
 header("Access-Control-Allow-Origin: *");
-header("Access-Control-Allow-Headers: Content-Type, X-API-Key");
+header("Access-Control-Allow-Headers: Content-Type");
 header("Access-Control-Allow-Methods: POST, OPTIONS");
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -33,8 +32,9 @@ header('Content-Type: application/json; charset=utf-8');
 // === DEBUG MODE ===
 $DEBUG = false;
 
-// === DiscDecode API CONFIGURATION ===
+// === DocDecode API CONFIGURATION ===
 $DISCDECODE_API_URL = "https://apidiscextract-production.up.railway.app";
+$DISCDECODE_API_KEY = "disc_live_5e6ecb8bc69cae8e25643b045f59b2fca3a5d3eec12321451ea0aa34ab56baa3";
 
 // === Database Connection (matching existing TransUnion integration) ===
 $DB_HOST1 = 'dedi1266.jnb1.host-h.net';
@@ -51,7 +51,6 @@ try {
 }
 
 // === INPUT FIELDS (multipart form-data) ===
-$apiKey          = $_POST['apiKey']          ?? '';
 $clientRef       = $_POST['clientRef']       ?? '';
 $lookupType      = $_POST['lookuptype']      ?? 'disc';
 $computerName    = $_POST['comid']           ?? '';
@@ -60,7 +59,7 @@ $password         = $_POST['password']        ?? '';
 $entityID         = $_POST['entityID']        ?? 0;
 $requestorPerson  = $_POST['requestorPerson'] ?? '';
 
-// === Map lookuptype to DiscDecode doc_type ===
+// === Map lookuptype to DocDecode doc_type ===
 $docTypeMap = [
     'disc'                  => 'licence_disc',
     'licence_disc'          => 'licence_disc',
@@ -76,16 +75,16 @@ $docTypeMap = [
 $docType = $docTypeMap[$lookupType] ?? 'generic';
 
 $date = date('Y-m-d H:i:s');
-$software_app = "DiscDecodeApp";
+$software_app = "DocDecodeApp";
 $remoteAddress = $_SERVER['REMOTE_ADDR'] ?? '';
 $request_uri   = $_SERVER['REQUEST_URI'] ?? '';
 
 // === Validate required input ===
-if (empty($apiKey)) {
+if (empty($clientRef)) {
     http_response_code(400);
     echo json_encode([
         "successful"   => false,
-        "errorMessage" => "API key is required. Provide 'apiKey' in form data."
+        "errorMessage" => "'clientRef' is required."
     ]);
     exit;
 }
@@ -113,7 +112,7 @@ if (!in_array($fileMimeType, $allowedTypes)) {
     exit;
 }
 
-// === Call DiscDecode API via /extract-doc ===
+// === Call DocDecode API via /extract-doc ===
 $ch = curl_init();
 
 $cFile = new CURLFile(
@@ -127,7 +126,7 @@ curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_POST           => true,
     CURLOPT_HTTPHEADER     => [
-        "X-API-Key: {$apiKey}",
+        "X-API-Key: {$DISCDECODE_API_KEY}",
     ],
     CURLOPT_POSTFIELDS     => [
         'image'    => $cFile,
@@ -148,7 +147,7 @@ if ($error) {
     http_response_code(500);
     $output = [
         "successful"   => false,
-        "errorMessage" => "Connection error to DiscDecode API: $error"
+        "errorMessage" => "Connection error to DocDecode API: $error"
     ];
     if ($DEBUG) {
         $output["debug"] = [
@@ -169,7 +168,7 @@ if ($apiResponse === null) {
     http_response_code(502);
     $output = [
         "successful"   => false,
-        "errorMessage" => "Invalid response from DiscDecode API (HTTP $httpCode)."
+        "errorMessage" => "Invalid response from DocDecode API (HTTP $httpCode)."
     ];
     if ($DEBUG) {
         $output["debug"] = [
@@ -186,7 +185,7 @@ if ($httpCode !== 200) {
     http_response_code(200);
     $output = [
         "successful"   => false,
-        "errorMessage" => $apiResponse['error'] ?? $apiResponse['detail'] ?? "DiscDecode API returned HTTP $httpCode."
+        "errorMessage" => $apiResponse['error'] ?? $apiResponse['detail'] ?? "DocDecode API returned HTTP $httpCode."
     ];
     if ($DEBUG) {
         $output["debug"] = [
@@ -209,18 +208,13 @@ $not_billable  = $lookup_result ? 0 : 1;
 // === Map extracted fields per document type ===
 $vin             = '';
 $regNumber       = '';
-$make            = '';
 $searchKeys      = '';
 $searchType      = '';
-$vehicleYear     = 0;
-$discExpiry      = '';
 
 switch ($docType) {
     case 'licence_disc':
         $vin         = $extractedData['vin'] ?? '';
-        $regNumber   = $extractedData['licence_number'] ?? '';
-        $make        = $extractedData['make'] ?? '';
-        $discExpiry  = $extractedData['date_of_expiry'] ?? '';
+        $regNumber   = $extractedData['vehicle_register_number'] ?? '';
         $searchKeys  = $vin ?: $regNumber;
         $searchType  = 'LicenceDisc';
         break;
@@ -234,8 +228,7 @@ switch ($docType) {
         break;
     case 'vehicle_registration':
         $vin         = $extractedData['vin'] ?? '';
-        $regNumber   = $extractedData['licence_number'] ?? '';
-        $make        = $extractedData['make'] ?? '';
+        $regNumber   = $extractedData['registration_number'] ?? '';
         $searchKeys  = $vin ?: $regNumber;
         $searchType  = 'VehicleReg';
         break;
@@ -305,7 +298,7 @@ try {
 
 } catch (Exception $ex) {
     $transLogStatus = "FAILED: " . $ex->getMessage();
-    error_log("DiscDecode transaction log insert failed: " . $ex->getMessage());
+    error_log("DocDecode transaction log insert failed: " . $ex->getMessage());
 }
 
 // === Return JSON Response ===
@@ -315,7 +308,6 @@ $output = [
     "lookupType"     => $docType,
     "transactionId"  => $transactionId,
     "data"           => $extractedData,
-    "usage"          => $usage,
 ];
 
 if ($DEBUG) {
