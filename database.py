@@ -238,20 +238,38 @@ def init_db():
         if USE_POSTGRES:
             cur = conn.cursor()
             cur.execute(_PG_SCHEMA)
-            # Migration: add doc_type column if missing
+        else:
+            conn.executescript(_SQLITE_SCHEMA)
+
+    # Run migrations in a separate transaction
+    _run_migrations()
+
+
+def _run_migrations():
+    """Add new columns to existing tables (safe to run repeatedly)."""
+    if USE_POSTGRES:
+        import psycopg2 as pg2
+        conn = pg2.connect(DATABASE_URL)
+        conn.autocommit = True  # DDL needs autocommit
+        try:
+            cur = conn.cursor()
             cur.execute("""
                 SELECT column_name FROM information_schema.columns
                 WHERE table_name = 'transaction_log' AND column_name = 'doc_type'
             """)
             if not cur.fetchone():
                 cur.execute("ALTER TABLE transaction_log ADD COLUMN doc_type VARCHAR(30)")
-        else:
-            conn.executescript(_SQLITE_SCHEMA)
-            # Migration: add doc_type column if missing
-            try:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Migration warning: %s", e)
+        finally:
+            conn.close()
+    else:
+        try:
+            with get_db() as conn:
                 conn.execute("ALTER TABLE transaction_log ADD COLUMN doc_type TEXT")
-            except Exception:
-                pass  # column already exists
+        except Exception:
+            pass  # column already exists
 
 
 # ---------------------------------------------------------------------------
