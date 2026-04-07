@@ -58,6 +58,45 @@ def _prepare_image(image_bytes: bytes, content_type: str) -> tuple[str, str]:
 # Claude Vision call (shared by all document types)
 # ---------------------------------------------------------------------------
 
+def _validate_sa_id(id_number: str) -> str:
+    """Validate and fix a South African ID number.
+    
+    SA IDs are exactly 13 digits. Common OCR errors:
+    - Letters mixed in: O->0, I/l->1, S->5, B->8, G->6, C->0, Z->2
+    """
+    if not id_number or id_number == 'null':
+        return id_number
+    
+    raw = id_number.strip()
+    
+    # Strip any prefix like "02/" from licence cards
+    if '/' in raw:
+        raw = raw.split('/')[-1]
+    
+    # Replace common OCR letter-to-digit confusions
+    letter_to_digit = {
+        'O': '0', 'o': '0', 'D': '0', 'd': '0', 'C': '0', 'c': '0',
+        'I': '1', 'l': '1', 'i': '1',
+        'Z': '2', 'z': '2',
+        'A': '4', 'a': '4',
+        'S': '5', 's': '5',
+        'G': '6', 'g': '6',
+        'T': '7', 't': '7',
+        'B': '8', 'b': '8', 'E': '8', 'e': '8',
+    }
+    
+    fixed = ''.join(letter_to_digit.get(ch, ch) for ch in raw)
+    fixed = ''.join(ch for ch in fixed if ch.isdigit())
+    
+    if len(fixed) == 13:
+        if fixed != raw:
+            logger.info("SA ID fixed: %s -> %s", raw, fixed)
+        return fixed
+    
+    # Fallback: return digits-only
+    return ''.join(ch for ch in raw if ch.isdigit())
+
+
 def _validate_vin(vin: str) -> str:
     """Validate and attempt to fix a VIN that isn't exactly 17 characters."""
     if not vin or vin == 'null':
@@ -192,6 +231,13 @@ def _call_vision(image_bytes: bytes, content_type: str, prompt: str) -> dict:
             if fixed_vin != original_vin:
                 logger.info("VIN fixed: %s → %s", original_vin, fixed_vin)
                 result['vin'] = fixed_vin
+        # Post-process: validate SA ID number (13 digits)
+        if isinstance(result, dict) and 'id_number' in result and result['id_number']:
+            original_id = result['id_number']
+            fixed_id = _validate_sa_id(original_id)
+            if fixed_id != original_id:
+                logger.info("SA ID fixed: %s -> %s", original_id, fixed_id)
+                result['id_number'] = fixed_id
         return result
     except json.JSONDecodeError:
         logger.error("Failed to parse Claude response:\n%s", raw_text)
@@ -336,7 +382,7 @@ If a field is not visible or unreadable, set its value to null.
 
 Important rules:
 - All dates must be converted to YYYY-MM-DD format (the card shows DD/MM/YYYY).
-- id_number should be the raw 13-digit number WITHOUT any prefix.
+- id_number should be the raw 13-digit number WITHOUT any prefix. It must contain ONLY digits (0-9), never letters. SA ID numbers are ALWAYS exactly 13 digits. Common OCR errors: 0 misread as O/D/C, 8 misread as B, 1 misread as I/l. If you see letters in what should be a 13-digit number, replace them with the most likely digit.
 - id_number_full should include the prefix exactly as printed.
 - licence_code is the letter code (A, B, C, C1, EC, etc.), NOT the licence number.
 - Numeric fields (restriction, card_number, vehicle_restriction) should be numbers, not strings.
