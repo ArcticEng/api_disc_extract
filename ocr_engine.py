@@ -17,6 +17,7 @@ import logging
 from io import BytesIO
 
 import anthropic
+from anthropic import APIStatusError
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -196,24 +197,41 @@ def _call_vision(image_bytes: bytes, content_type: str, prompt: str) -> dict:
     client = anthropic.Anthropic()
     b64_data, media_type = _prepare_image(image_bytes, content_type)
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": b64_data,
-                    },
-                },
-                {"type": "text", "text": prompt},
-            ],
-        }],
-    )
+    message = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            message = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2048,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": b64_data,
+                            },
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+            )
+            break  # Success
+        except APIStatusError as e:
+            last_error = e
+            if e.status_code == 529:  # Overloaded
+                import time
+                wait = (attempt + 1) * 3  # 3s, 6s, 9s
+                logger.warning("Anthropic API overloaded (attempt %d/3), retrying in %ds...", attempt + 1, wait)
+                time.sleep(wait)
+            else:
+                raise  # Non-retriable error, raise immediately
+
+    if message is None:
+        raise Exception(f"Anthropic API unavailable after 3 retries. Please try again in a moment. (Error: {last_error})")
 
     raw_text = message.content[0].text.strip()
     if raw_text.startswith("```"):
